@@ -34,8 +34,8 @@ downloaded signal-cli binary).
       account (`DATA_DIR/accounts/<number>/`; an existing `DATA_DIR/signal-web.db` is adopted in place),
       routes under `/api/accounts/{acct}`, events tagged with `account`, account switcher with
       cross-account unread dot and notifications, "Link another account". Tested against the fake
-      (`test_multiple_accounts`) and a copy of the owner's real single-account DB; **linking a second
-      real account is unverified**
+      (`test_multiple_accounts`) and a copy of the owner's real single-account DB. The owner linked a
+      second real account and it works, including updates for the account not on screen
 
 ## P0: prove it against real Signal
 
@@ -86,8 +86,9 @@ downloaded signal-cli binary).
       removes the device on their phone, then delete its folder, with a confirm; check the signal-cli
       docs for how a linked device unlinks itself); per-account notification mute;
       detect a remote unlink (signal-cli errors with "not registered") and show it on the account
-- [ ] Verify against real signal-cli that `subscribeReceive` (no account param) delivers envelopes for an
-      account linked *after* the subscription, and that `getAvatar {profile: <own number>}` returns
+- [x] Verify against real signal-cli that `subscribeReceive` (no account param) delivers envelopes for an
+      account linked *after* the subscription (owner, 2026-11-12)
+- [ ] Verify that `getAvatar {profile: <own number>}` returns
       your own picture (used by the account switcher; it falls back to initials)
 
 - [ ] Sending @mentions in groups (composer autocomplete → `mention` param)

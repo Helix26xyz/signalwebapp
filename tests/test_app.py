@@ -148,6 +148,14 @@ def test_link_receive_send_flow(env):
     wait_for(lambda: client.get(f"{A}/conversations/u:{ALICE}").json()["last_preview"] == "sent on my phone")
 
     # group: send goes to groupId
+    # start chat: picking a contact sends its UUID (dashes and all); typing a number gets normalized
+    r = client.post(f"{A}/conversations", json={"recipient": ALICE})
+    assert r.status_code == 200 and r.json()["id"] == f"u:{ALICE}", r.text
+    r = client.post(f"{A}/conversations", json={"recipient": "+1 555-000-0002"})
+    assert r.json()["id"] == f"u:{ALICE}", "known number resolves to the contact's UUID"
+    assert client.post(f"{A}/conversations", json={"recipient": "+1 555 abc"}).status_code == 400
+    assert client.post(f"{A}/conversations", json={"recipient": "self"}).json()["id"] == "u:self"
+
     client.post(f"{A}/conversations", json={"group_id": GID})
     client.post(f"{A}/conversations/g:{GID}/messages", data={"text": "hi fam"})
     assert calls("send")[-1]["params"]["groupId"] == GID

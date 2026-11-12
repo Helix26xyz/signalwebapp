@@ -142,8 +142,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if body.group_id:
             conv_id = f"g:{body.group_id}"
         elif body.recipient:
-            r = normalize_number(body.recipient)
+            # Only phone numbers get normalized: contacts are sent as UUIDs, which contain dashes.
+            r = body.recipient.strip()
             if r.startswith("+"):
+                r = normalize_number(r)
                 if not re.fullmatch(r"\+\d{6,15}", r):
                     raise HTTPException(400, "Use a phone number in international format, e.g. +15551234567")
                 number = r
