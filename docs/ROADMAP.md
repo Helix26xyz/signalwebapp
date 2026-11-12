@@ -33,8 +33,9 @@ downloaded signal-cli binary).
 
 ## P0: prove it against real Signal
 
-- [ ] Build both Docker targets (`native`, `jvm`) and fix whatever breaks
-- [ ] Link to a real account; confirm `finishLink` result shape, `listAccounts` → `aci`, and that
+- [ ] Build both Docker targets (`native`, `jvm`) and fix whatever breaks. *`native` builds and runs
+      (owner, 2026-11-12); `jvm` not yet tried*
+- [ ] Link to a real account (*done by the owner 2026-11-12; 1:1 receive/send works*); confirm `finishLink` result shape, `listAccounts` → `aci`, and that
       `subscribeReceive` picks up the newly linked account without a restart
 - [ ] Capture real envelopes from `raw_events` (scrub them) and add them as fixtures in
       `tests/fixtures/`, then replay them in tests. Check these field names against reality:
@@ -50,6 +51,14 @@ downloaded signal-cli binary).
 - [ ] Safety-number change with `TRUST_NEW_IDENTITIES=always`: confirm sending keeps working
 - [ ] Check that bind-mount permissions for `data/` (uid 1000) are documented correctly
 
+### Findings from the first real run (2026-11-12)
+
+- Real envelopes so far contain `dataMessage`, `receiptMessage`, `typingMessage` and
+  `syncMessage.{readMessages,type,blockedNumbers,blockedGroupIds}`; field names match what ingest
+  expects. Many `syncMessage` objects arrive **empty** (sync types signal-cli doesn't serialize); ingest
+  ignores them correctly. No `syncMessage.sentMessage` captured yet, so "sent from phone" is still unverified.
+- `syncMessage.blockedNumbers` / `blockedGroupIds` are ignored; could feed the P2 block/unblock work.
+
 ## P1: safe to put behind the owner's auth
 
 - [ ] **WebSocket Origin check.** Once cookie auth is added, `/ws` is open to cross-site WebSocket
@@ -61,8 +70,8 @@ downloaded signal-cli binary).
       `/ws` and `/`
 - [ ] Security headers: CSP (`default-src 'self'; img-src 'self' blob:; media-src 'self' blob:`),
       `X-Content-Type-Options`, `Referrer-Policy: no-referrer` (links in messages)
-- [ ] Attachments: force `Content-Disposition: attachment` for HTML/SVG/unknown content types so the
-      browser never renders them inline
+- [x] Attachments: force `Content-Disposition: attachment` for HTML/SVG/unknown content types so the
+      browser never renders them inline (only passive image/video/audio types are inline; `nosniff` set)
 - [ ] Rate-limit and size-check uploads before reading them fully into memory
 
 ## P2: feature parity with a real chat app

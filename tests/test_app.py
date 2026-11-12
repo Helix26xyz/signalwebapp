@@ -86,14 +86,26 @@ def test_link_receive_send_flow(env):
     assert att.headers["content-type"] == "image/jpeg"
     assert client.get("/api/attachments/..%2Fetc%2Fpasswd").status_code == 404
 
+    # sender-controlled names and types: non-ASCII filenames work, active content never renders inline
+    push({"sourceUuid": ALICE, "sourceNumber": "+15550000002", "timestamp": 1_700_000_000_050,
+          "dataMessage": {"timestamp": 1_700_000_000_050, "message": "",
+                          "attachments": [{"id": "page1.html", "contentType": "text/html", "filename": "фото \"x\".html"}]}})
+    wait_for(lambda: client.get(f"/api/conversations/u:{ALICE}").json()["last_preview"] == "📎 Attachment")
+    html = client.get("/api/attachments/page1.html")
+    assert html.headers["content-disposition"].startswith("attachment;")
+    assert "filename*=utf-8''%D1%84%D0%BE%D1%82%D0%BE" in html.headers["content-disposition"]
+    assert html.headers["x-content-type-options"] == "nosniff"
+    assert client.get("/api/attachments/pic1.jpg").headers["content-disposition"].startswith("inline;")
+
     # reading sends a read receipt (signal-cli turns it into a read-sync for our phones too)
     client.post(f"/api/conversations/u:{ALICE}/read")
     [receipt] = calls("sendReceipt")
-    assert receipt["params"]["recipient"] == ALICE and receipt["params"]["targetTimestamp"] == [1_700_000_000_000]
+    assert receipt["params"]["recipient"] == ALICE and receipt["params"]["targetTimestamp"] == [1_700_000_000_000, 1_700_000_000_050]
     assert client.get(f"/api/conversations/u:{ALICE}").json()["unread"] == 0
 
     # reply with quote + attachment
     incoming = client.get(f"/api/conversations/u:{ALICE}/messages").json()[0]
+    assert incoming["body"] == "hello from alice"
     sent = client.post(
         f"/api/conversations/u:{ALICE}/messages",
         data={"text": "hi alice", "quote_id": str(incoming["id"])},

@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import quote
 
 import segno
 from fastapi import APIRouter, FastAPI, File, Form, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
@@ -26,6 +28,17 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 STATIC = Path(__file__).parent / "static"
+INLINE_SAFE = re.compile(r"^(image/(jpeg|png|gif|webp|avif|heic|heif|bmp)|video/[\w.+-]+|audio/[\w.+-]+)$", re.I)
+
+
+def content_disposition(disposition: str, filename: str) -> str:
+    """RFC 6266 header that survives non-ASCII names (headers are latin-1 on the wire)."""
+    ascii_name = re.sub(r'[^\x20-\x7e]|["\\]', "_", filename) or "file"
+    return f"{disposition}; filename=\"{ascii_name}\"; filename*=utf-8''{quote(filename, safe='')}"
+
+
+def normalize_number(raw: str) -> str:
+    return re.sub(r"[\s\-().]", "", raw.strip())
 
 
 class NewConversation(BaseModel):
@@ -109,10 +122,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if body.group_id:
             conv_id = f"g:{body.group_id}"
         elif body.recipient:
-            r = body.recipient.strip().replace(" ", "").replace("-", "")
+            r = normalize_number(body.recipient)
             if r.startswith("+"):
-                r = service.store.rid_for_number(r) or r
-                service.store.upsert_recipient(r, number=body.recipient.strip() if r.startswith("+") else None)
+                if not re.fullmatch(r"\+\d{6,15}", r):
+                    raise HTTPException(400, "Use a phone number in international format, e.g. +15551234567")
+                number = r
+                r = service.store.rid_for_number(number) or number
+                if r == number:
+                    service.store.upsert_recipient(r, number=number)
             elif r != "self" and not service.store.recipient(r):
                 raise HTTPException(400, "Use a phone number in international format, e.g. +15551234567")
             conv_id = f"u:{r}"
@@ -246,11 +263,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         content, ct = found
         meta = svc(request).store.find_attachment(att_id) or {}
         filename = meta.get("filename") or att_id
-        disposition = "attachment" if download else "inline"
-        headers = {"Cache-Control": "private, max-age=31536000, immutable"}
+        # The content type comes from the sender. Only render passive media inline; anything else
+        # (HTML, SVG, PDF, unknown) is forced to download so it can't run script on our origin.
+        inline_ok = bool(INLINE_SAFE.match(ct))
+        disposition = "inline" if inline_ok and not download else "attachment"
+        headers = {"Cache-Control": "private, max-age=31536000, immutable", "X-Content-Type-Options": "nosniff"}
         if isinstance(content, Path):
             return FileResponse(content, media_type=ct, filename=filename, content_disposition_type=disposition, headers=headers)
-        headers["Content-Disposition"] = f'{disposition}; filename="{filename}"'
+        headers["Content-Disposition"] = content_disposition(disposition, filename)
         return Response(content, media_type=ct, headers=headers)
 
     @api.get("/avatars/{conv_id:path}")

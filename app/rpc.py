@@ -55,6 +55,7 @@ class SignalRPC:
         self._main_task: asyncio.Task | None = None
         self._notify_queue: asyncio.Queue = asyncio.Queue()
         self._notify_task: asyncio.Task | None = None
+        self._stderr_task: asyncio.Task | None = None
         self.last_error: str | None = None
 
     @property
@@ -88,7 +89,8 @@ class SignalRPC:
         if params:
             msg["params"] = {k: v for k, v in params.items() if v is not None}
         try:
-            assert self._writer is not None
+            if self._writer is None:  # connection dropped between the wait and now
+                raise ConnectionError("signal-cli is not connected")
             self._writer.write(json.dumps(msg, separators=(",", ":")).encode() + b"\n")
             await self._writer.drain()
             return await asyncio.wait_for(fut, timeout=timeout)
@@ -160,7 +162,8 @@ class SignalRPC:
             stderr=asyncio.subprocess.PIPE,
             limit=LINE_LIMIT,
         )
-        asyncio.create_task(self._pipe_stderr(self._proc.stderr))
+        # Keep a reference: the event loop only holds tasks weakly.
+        self._stderr_task = asyncio.create_task(self._pipe_stderr(self._proc.stderr))
         self._writer = self._proc.stdin  # type: ignore[assignment]
         return self._proc.stdout  # type: ignore[return-value]
 
