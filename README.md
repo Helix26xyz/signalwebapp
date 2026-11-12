@@ -115,6 +115,9 @@ it up the way you would your phone.
 
 ## Development
 
+Project status and backlog: [`docs/ROADMAP.md`](docs/ROADMAP.md). Conventions for contributors and
+coding agents: [`AGENTS.md`](AGENTS.md).
+
 ```bash
 .venv/bin/pip install -r requirements-dev.txt
 .venv/bin/python -m pytest -q          # unit + end-to-end tests (uses a fake signal-cli)
