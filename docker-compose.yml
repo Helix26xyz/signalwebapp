@@ -1,0 +1,20 @@
+services:
+  signal-web:
+    build:
+      context: .
+      # Use "jvm" on arm64 (Raspberry Pi, Ampere, Apple silicon hosts).
+      target: native
+    container_name: signal-web
+    restart: unless-stopped
+    ports:
+      # No auth built in. Keep this on localhost/LAN and put your auth proxy in front.
+      - "127.0.0.1:8080:8080"
+    volumes:
+      # Holds your Signal keys (signal-cli/) and the message history DB. Back it up; keep it private.
+      - ./data:/data
+    environment:
+      DEVICE_NAME: "Signal Web"
+      SEND_READ_RECEIPTS: "true"
+      SEND_TYPING: "true"
+      TRUST_NEW_IDENTITIES: "always"
+      LOG_LEVEL: "INFO"
