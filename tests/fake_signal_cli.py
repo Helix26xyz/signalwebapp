@@ -5,7 +5,10 @@ It speaks the same newline-delimited JSON-RPC over stdin/stdout. Extras for test
   * every request is appended to $FAKE_LOG (one JSON per line)
   * any *.json file dropped into $FAKE_INJECT_DIR is emitted as a `receive` notification
     (contents = the {"envelope": ...} object) and then deleted
-  * FAKE_AUTO_LINK=1 makes finishLink succeed after 0.3s
+  * FAKE_AUTO_LINK=1 makes finishLink succeed after 0.3s. Each successful link adds the next
+    account from ACCOUNTS, like linking a second phone number
+  * multi-account like the real thing: listContacts/listGroups answer per `account` param, and an
+    injected payload's "account" field says which account received it (default: the first)
 """
 
 import json
@@ -19,7 +22,13 @@ args = sys.argv[1:]
 config = Path(args[args.index("--config") + 1]) if "--config" in args else Path(".")
 config.mkdir(parents=True, exist_ok=True)
 accounts_file = config / "fake-accounts.json"
-ACCOUNT = {"number": "+15550000001", "aci": "aaaaaaaa-0000-4000-8000-000000000001"}
+ACCOUNTS = [
+    {"number": "+15550000001", "aci": "aaaaaaaa-0000-4000-8000-000000000001"},
+    {"number": "+15550000009", "aci": "99999999-0000-4000-8000-000000000009"},
+]
+ACCOUNT = ACCOUNTS[0]
+ALICE = {"number": "+15550000002", "uuid": "bbbbbbbb-0000-4000-8000-000000000002"}
+DAN = {"number": "+15550000005", "uuid": "eeeeeeee-0000-4000-8000-000000000005"}
 
 log_path = os.environ.get("FAKE_LOG")
 inject_dir = Path(os.environ["FAKE_INJECT_DIR"]) if os.environ.get("FAKE_INJECT_DIR") else None
@@ -37,6 +46,14 @@ def accounts():
     return json.loads(accounts_file.read_text()) if accounts_file.exists() else []
 
 
+def account_for(params):
+    """Multi-account mode: account-scoped methods must say which account (like signal-cli)."""
+    for a in ACCOUNTS:
+        if params.get("account") in (a["number"], a["aci"]) and a in accounts():
+            return a
+    raise ValueError(f"unknown account {params.get('account')!r}")
+
+
 def handle(method, params):
     if method == "listAccounts":
         return accounts()
@@ -49,22 +66,35 @@ def handle(method, params):
         if os.environ.get("FAKE_AUTO_LINK") != "1":
             time.sleep(3600)
         time.sleep(0.3)
-        accounts_file.write_text(json.dumps([ACCOUNT]))
-        return {"number": ACCOUNT["number"], "aci": ACCOUNT["aci"]}
+        linked = accounts()
+        new = next((a for a in ACCOUNTS if a not in linked), None)
+        if new is None:
+            raise RuntimeError("all fake accounts are already linked")
+        accounts_file.write_text(json.dumps(linked + [new]))
+        return new
+    if method not in ("listAccounts", "subscribeReceive", "startLink", "finishLink"):
+        account_for(params)
     if method == "send":
         return {"timestamp": int(time.time() * 1000), "results": [{"type": "SUCCESS"}]}
     if method in ("sendReaction", "remoteDelete", "sendReceipt", "sendTyping", "sendSyncRequest"):
         return {"timestamp": int(time.time() * 1000), "results": [{"type": "SUCCESS"}]}
     if method == "listContacts":
+        me = account_for(params)
+        if me is ACCOUNTS[1]:
+            return [
+                {**DAN, "name": "Dan Work", "profile": {"givenName": "Dan"}, "isBlocked": False},
+                {"number": me["number"], "uuid": me["aci"], "name": "", "profile": {"givenName": "Work"}},
+            ]
         return [
-            {"number": "+15550000002", "uuid": "bbbbbbbb-0000-4000-8000-000000000002", "name": "Alice Contact",
-             "profile": {"givenName": "Alice", "familyName": "P"}, "isBlocked": False},
-            {"number": ACCOUNT["number"], "uuid": ACCOUNT["aci"], "name": "", "profile": {}},
+            {**ALICE, "name": "Alice Contact", "profile": {"givenName": "Alice", "familyName": "P"}, "isBlocked": False},
+            {"number": me["number"], "uuid": me["aci"], "name": "", "profile": {"givenName": "Pat", "familyName": "Q"}},
         ]
     if method == "listGroups":
+        me = account_for(params)
+        if me is ACCOUNTS[1]:
+            return []
         return [{"id": "R3JvdXAxMjM0NTY3ODkwMTIzNDU2Nzg5MDEyMzQ1Njc4OTA=", "name": "Family", "isMember": True,
-                 "members": [{"number": ACCOUNT["number"], "uuid": ACCOUNT["aci"]},
-                             {"number": "+15550000002", "uuid": "bbbbbbbb-0000-4000-8000-000000000002"}]}]
+                 "members": [{"number": me["number"], "uuid": me["aci"]}, ALICE]}]
     if method == "getAttachment":
         import base64
         return {"data": base64.b64encode(b"fake-bytes-" + params["id"].encode()).decode()}

@@ -146,6 +146,10 @@ class Store:
     def transaction(self):
         return _Tx(self)
 
+    def close(self) -> None:
+        with self._lock:
+            self.db.close()
+
     # ------------------------------------------------------------------ meta
 
     def get_meta(self, key: str, default: str | None = None) -> str | None:
@@ -254,6 +258,10 @@ class Store:
             vals,
         )
 
+    def list_groups(self, member_only: bool = True) -> list[dict]:
+        sql = "SELECT id, name FROM groups" + (" WHERE is_member=1" if member_only else "") + " ORDER BY name"
+        return [dict(r) for r in self._q(sql)]
+
     def group(self, gid: str) -> dict | None:
         row = self._one("SELECT * FROM groups WHERE id=?", (gid,))
         if not row:
@@ -308,6 +316,10 @@ class Store:
             sql += " AND archived=0"
         sql += " ORDER BY last_ts DESC"
         return [self._decorate_conversation(dict(r)) for r in self._q(sql)]
+
+    def total_unread(self) -> int:
+        row = self._one("SELECT COALESCE(SUM(unread), 0) AS n FROM conversations WHERE archived=0")
+        return int(row["n"]) if row else 0
 
     def set_archived(self, conv_id: str, archived: bool) -> None:
         self._x("UPDATE conversations SET archived=? WHERE id=?", (1 if archived else 0, conv_id))

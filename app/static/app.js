@@ -30,6 +30,7 @@ const ICONS = {
   group: "M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z",
   note: "M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-2 10H7v-2h10v2zm0-4H7V7h10v2zm-3 8H7v-2h7v2z",
   download: "M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z",
+  add: "M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z",
 };
 function icon(name) {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -65,6 +66,11 @@ const $ = (id) => document.getElementById(id);
 // ------------------------------------------------------------------ state
 const S = {
   status: null,
+  account: null,             // id of the Signal account being shown (its number, or ACI)
+  accounts: [],              // [{id, number, name, unread, linked}] for every account
+  addingAccount: false,      // link screen opened from the account menu
+  linkGen: 0,                // which /link attempt we're waiting on
+  notified: new Set(),       // "account|message id" already shown as a desktop notification
   convs: new Map(),          // id -> conversation
   showArchived: false,
   current: null,             // conversation id
@@ -78,7 +84,7 @@ const S = {
   tempId: -1,
   searchTerm: "",
   searchHits: [],
-  notify: localStorage.getItem("notify") === "1",
+  notify: lsGet("notify") === "1",
 };
 const QUICK_EMOJI = ["❤️", "👍", "👎", "😂", "😮", "😢"];
 
@@ -102,6 +108,9 @@ async function api(path, opts = {}) {
   return res.status === 204 ? null : res.json();
 }
 const enc = (id) => id.split("/").map(encodeURIComponent).join("/");
+// Everything about one account lives under /api/accounts/<id>/...
+const abase = (acct = S.account) => `/api/accounts/${encodeURIComponent(acct)}`;
+const aapi = (path, opts) => api(abase().slice(4) + path, opts);
 
 // ------------------------------------------------------------------ formatting
 const pad = (n) => String(n).padStart(2, "0");
@@ -143,7 +152,7 @@ function avatarEl(conv, size = "") {
   if (conv.id === "u:self") { el.append(icon("note")); return el; }
   if (conv.kind === "group" && !conv.name) el.append(icon("group"));
   else el.append(initials(conv.name));
-  const img = h("img", { alt: "", loading: "lazy", src: `/api/avatars/${enc(conv.id)}` });
+  const img = h("img", { alt: "", loading: "lazy", src: `${abase()}/avatars/${enc(conv.id)}` });
   img.addEventListener("error", () => img.remove());
   img.addEventListener("load", () => { if (!img.naturalWidth) img.remove(); });
   el.append(img);
@@ -153,7 +162,7 @@ function personAvatar(rid, name, size = "sm") {
   const el = h("div", { class: `avatar ${size}` });
   el.style.background = colorFor("u:" + rid);
   el.append(initials(name));
-  const img = h("img", { alt: "", loading: "lazy", src: `/api/avatars/u:${enc(rid)}` });
+  const img = h("img", { alt: "", loading: "lazy", src: `${abase()}/avatars/u:${enc(rid)}` });
   img.addEventListener("error", () => img.remove());
   el.append(img);
   return el;
@@ -261,10 +270,13 @@ function renderConvList() {
 }
 function updateTitle() {
   let n = 0; for (const c of S.convs.values()) if (!c.archived) n += c.unread || 0;
+  n += otherUnread();
   document.title = n ? `(${n}) Signal Web` : "Signal Web";
 }
 async function loadConversations() {
-  const [active, archived] = await Promise.all([api("/conversations"), api("/conversations?archived=true")]);
+  const acct = S.account;
+  const [active, archived] = await Promise.all([aapi("/conversations"), aapi("/conversations?archived=true")]);
+  if (S.account !== acct) return;
   S.convs.clear();
   for (const c of [...active, ...archived]) { S.convs.set(c.id, c); cacheName(c); }
   renderConvList();
@@ -282,10 +294,11 @@ async function openConversation(id, focusMsgId) {
     $("input").value = "";
     autoGrow();
   }
+  const acct = S.account;
   if (!S.convs.has(id)) {
-    try { const c = await api(`/conversations/${enc(id)}`); S.convs.set(c.id, c); cacheName(c); } catch (e) { toast(e.message); return; }
+    try { const c = await aapi(`/conversations/${enc(id)}`); if (S.account !== acct) return; S.convs.set(c.id, c); cacheName(c); } catch (e) { toast(e.message); return; }
   }
-  history.replaceState(null, "", "#" + encodeURIComponent(id));
+  setHash();
   $("app").classList.add("in-thread");
   $("empty-thread").hidden = true;
   $("thread-head").hidden = $("messages").hidden = $("composer").hidden = false;
@@ -294,8 +307,8 @@ async function openConversation(id, focusMsgId) {
   renderConvList();
   renderThreadHeader();
   $("message-items").replaceChildren();
-  const msgs = await api(`/conversations/${enc(id)}/messages?limit=60`);
-  if (S.current !== id) return;
+  const msgs = await aapi(`/conversations/${enc(id)}/messages?limit=60`);
+  if (S.current !== id || S.account !== acct) return;
   S.msgs.set(id, msgs);
   S.hasMore.set(id, msgs.length >= 60);
   renderMessages({ scroll: "bottom" });
@@ -361,7 +374,7 @@ function renderMessages({ scroll } = {}) {
   updateJumpBtn();
 }
 
-function attUrl(a, download) { return `/api/attachments/${encodeURIComponent(a.id)}${download ? "?download=true" : ""}`; }
+function attUrl(a, download) { return `${abase()}/attachments/${encodeURIComponent(a.id)}${download ? "?download=true" : ""}`; }
 function messageEl(m, conv, { first, last, showStatus }) {
   const isGroup = conv.kind === "group";
   const row = h("div", { class: `msg${m.outgoing ? " out" : ""}${first ? " first" : ""}${last ? " last" : ""}`, dataset: { mid: m.id } });
@@ -489,12 +502,12 @@ function jumpToQuote(q) {
 
 async function loadOlder() {
   if (S.loadingOlder || !S.hasMore.get(S.current)) return;
-  const id = S.current, list = S.msgs.get(id) || [];
+  const id = S.current, acct = S.account, list = S.msgs.get(id) || [];
   if (!list.length) return;
   S.loadingOlder = true;
   try {
-    const older = await api(`/conversations/${enc(id)}/messages?before=${list[0].sent_ts}&limit=60`);
-    if (S.current !== id) return;
+    const older = await aapi(`/conversations/${enc(id)}/messages?before=${list[0].sent_ts}&limit=60`);
+    if (S.current !== id || S.account !== acct) return;
     const known = new Set(list.map((m) => m.id));
     S.msgs.set(id, [...older.filter((m) => !known.has(m.id)), ...list]);
     S.hasMore.set(id, older.length >= 60);
@@ -547,10 +560,13 @@ function openMenu(m, anchor, emojiOnly) {
   const row = document.querySelector(`[data-mid="${m.id}"]`);
   if (row) row.classList.add("menu-open");
 }
-document.addEventListener("click", (e) => { if (!$("msg-menu").contains(e.target)) closeMenu(); });
+document.addEventListener("click", (e) => {
+  if (!$("msg-menu").contains(e.target)) closeMenu();
+  if (!$("account-menu").contains(e.target)) closeAccountMenu();
+});
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
-    closeMenu();
+    closeMenu(); closeAccountMenu();
     if (!$("lightbox").hidden) $("lightbox").hidden = true;
     else if (S.replyTo || S.editing) cancelContext();
   }
@@ -558,12 +574,12 @@ document.addEventListener("keydown", (e) => {
 
 // ------------------------------------------------------------------ actions
 async function react(m, emoji, remove) {
-  try { await api(`/messages/${m.id}/react`, { json: { emoji, remove } }); } catch (e) { toast("Reaction failed: " + e.message); }
+  try { await aapi(`/messages/${m.id}/react`, { json: { emoji, remove } }); } catch (e) { toast("Reaction failed: " + e.message); }
 }
 async function deleteMsg(m, everyone) {
   if (everyone && !confirm("Delete this message for everyone?")) return;
   if (!everyone && !confirm("Delete this message from Signal Web? (It stays on your other devices.)")) return;
-  try { await api(`/messages/${m.id}/delete`, { json: { everyone } }); } catch (e) { toast("Delete failed: " + e.message); }
+  try { await aapi(`/messages/${m.id}/delete`, { json: { everyone } }); } catch (e) { toast("Delete failed: " + e.message); }
 }
 function startReply(m) { S.editing = null; S.replyTo = m; renderComposerContext(); $("input").focus(); }
 function startEdit(m) { S.replyTo = null; S.editing = m; S.files = []; renderPendingFiles(); $("input").value = m.body || ""; autoGrow(); renderComposerContext(); $("input").focus(); }
@@ -578,7 +594,7 @@ function renderComposerContext() {
 }
 
 async function sendCurrent() {
-  const convId = S.current;
+  const convId = S.current, acct = S.account;
   const input = $("input");
   const text = input.value.trim();
   if (!convId || (!text && !S.files.length)) return;
@@ -605,10 +621,12 @@ async function sendCurrent() {
   if (convId === S.current) renderMessages({ scroll: "bottom" });
   stopTyping();
   try {
-    const msg = await api(`/conversations/${enc(convId)}/messages`, { form });
+    const msg = await aapi(`/conversations/${enc(convId)}/messages`, { form });
+    if (S.account !== acct) return;
     if (temp) removeMessage(convId, temp.id, false);
     upsertMessage(msg);
   } catch (e) {
+    if (S.account !== acct) return toast("Message not sent: " + e.message);
     if (temp) { temp.status = "failed"; upsertMessage(temp); }
     toast("Message not sent: " + e.message);
     if (!temp) { $("input").value = text; }
@@ -629,7 +647,7 @@ function markReadSoon() {
   readTimer = setTimeout(() => {
     const c = S.convs.get(S.current);
     if (c && c.unread && document.visibilityState === "visible" && document.hasFocus()) {
-      api(`/conversations/${enc(c.id)}/read`, { method: "POST" }).catch(() => {});
+      aapi(`/conversations/${enc(c.id)}/read`, { method: "POST" }).catch(() => {});
     }
   }, 400);
 }
@@ -642,14 +660,14 @@ function onTypingInput() {
   if (!S.current || S.current === "u:self") return;
   if (!typingActive && $("input").value.trim()) {
     typingActive = true;
-    api(`/conversations/${enc(S.current)}/typing`, { json: { started: true } }).catch(() => {});
+    aapi(`/conversations/${enc(S.current)}/typing`, { json: { started: true } }).catch(() => {});
   }
   clearTimeout(typingTimer);
   typingTimer = setTimeout(stopTyping, 5000);
 }
 function stopTyping() {
   clearTimeout(typingTimer);
-  if (typingActive && S.current) api(`/conversations/${enc(S.current)}/typing`, { json: { started: false } }).catch(() => {});
+  if (typingActive && S.current) aapi(`/conversations/${enc(S.current)}/typing`, { json: { started: false } }).catch(() => {});
   typingActive = false;
 }
 // typing indicator (incoming)
@@ -706,7 +724,7 @@ function renderPendingFiles() {
 
 // ------------------------------------------------------------------ details panel
 async function showDetails() {
-  const c = await api(`/conversations/${enc(S.current)}`);
+  const c = await aapi(`/conversations/${enc(S.current)}`);
   const body = $("details-body");
   const kids = [h("div", { class: "big-avatar" }, avatarEl(c)), h("h3", {}, c.name)];
   if (c.number && c.kind === "direct") kids.push(h("p", { class: "muted", style: "text-align:center" }, c.number));
@@ -731,7 +749,7 @@ async function openNewChat() {
   $("new-chat-input").value = "";
   dlg.showModal();
   $("new-chat-input").focus();
-  try { contactsCache = await api("/contacts"); } catch (_) { contactsCache = { people: [], groups: [] }; }
+  try { contactsCache = await aapi("/contacts"); } catch (_) { contactsCache = { people: [], groups: [] }; }
   renderPickList();
 }
 function renderPickList() {
@@ -755,7 +773,7 @@ function convRowLike(c, sub, onclick, hide) {
 }
 async function startChatWith(body) {
   try {
-    const c = await api("/conversations", { json: body });
+    const c = await aapi("/conversations", { json: body });
     S.convs.set(c.id, c); cacheName(c);
     $("new-chat").close();
     openConversation(c.id);
@@ -789,18 +807,23 @@ async function toggleNotify() {
     if (p !== "granted") return toast("Notifications were blocked by the browser");
   }
   S.notify = !S.notify;
-  localStorage.setItem("notify", S.notify ? "1" : "0");
+  lsSet("notify", S.notify ? "1" : "0");
   renderNotifBtn();
 }
-function maybeNotify(m) {
-  if (!S.notify || m.outgoing || m.kind !== "message" || m.is_read) return;
-  if (document.visibilityState === "visible" && document.hasFocus() && S.current === m.conversation_id) return;
-  const c = S.convs.get(m.conversation_id);
+function maybeNotify(m, acct) {
+  if (!S.notify || m.outgoing || m.kind !== "message" || m.is_read || m.deleted) return;
+  const key = acct + "|" + m.id;
+  if (S.notified.has(key)) return; // later updates (reactions, receipts) re-send the same message
+  const here = acct === S.account;
+  if (here && document.visibilityState === "visible" && document.hasFocus() && S.current === m.conversation_id) return;
+  const c = here ? S.convs.get(m.conversation_id) : null;
   if (c && c.archived) return;
+  S.notified.add(key);
   try {
-    const title = c ? (c.kind === "group" ? `${m.author_name} · ${c.name}` : c.name) : m.author_name;
-    const n = new Notification(title, { body: m.body || (m.attachments.length ? "📎 Attachment" : ""), tag: m.conversation_id, renotify: true });
-    n.onclick = () => { window.focus(); openConversation(m.conversation_id); n.close(); };
+    let title = c ? (c.kind === "group" ? `${m.author_name} · ${c.name}` : c.name) : m.author_name;
+    if (S.accounts.length > 1) title += ` → ${accountLabel(accountById(acct))}`;
+    const n = new Notification(title, { body: m.body || (m.attachments.length ? "📎 Attachment" : ""), tag: acct + "|" + m.conversation_id, renotify: true });
+    n.onclick = () => { window.focus(); switchAccount(acct, m.conversation_id); n.close(); };
   } catch (_) {}
 }
 function openLightbox(src) { $("lightbox-img").src = src; $("lightbox").hidden = false; }
@@ -817,6 +840,7 @@ async function startLink() {
   $("qr").replaceChildren(h("p", { class: "muted" }, "Generating…"));
   try {
     const res = await api("/link", { method: "POST" });
+    S.linkGen = res.gen;
     const wrap = h("div");
     wrap.innerHTML = res.qr_svg; // server-generated SVG from segno (no user content)
     $("qr").replaceChildren(wrap);
@@ -826,24 +850,150 @@ async function startLink() {
     $("link-msg").textContent = "Could not start linking: " + e.message;
   }
 }
+function showLinkScreen(adding) {
+  S.addingAccount = adding;
+  $("link-title").textContent = adding ? "Link another Signal account" : "Link Signal Web to your account";
+  $("link-cancel").hidden = !adding;
+  $("qr").replaceChildren(h("button", { class: "btn primary", onclick: startLink }, "Show QR code"));
+  $("link-msg").textContent = "";
+  renderScreens();
+}
+function cancelAddAccount() {
+  if (S.status?.linking) api("/link", { method: "DELETE" }).catch(() => {});
+  S.addingAccount = false;
+  renderScreens();
+}
+function renderScreens() {
+  const st = S.status;
+  if (!st) return;
+  const hasAccounts = S.accounts.length > 0;
+  const linkScreen = st.state !== "starting" && (!hasAccounts || S.addingAccount);
+  $("link-screen").hidden = !linkScreen;
+  // With accounts on disk the history is readable even while signal-cli is still starting.
+  $("app").hidden = linkScreen || !hasAccounts;
+}
 function applyStatus(st) {
-  const prev = S.status?.state;
+  const prev = S.status;
   S.status = st;
-  const linked = st.state === "ready" || (st.account && st.state === "disconnected");
-  $("link-screen").hidden = linked || st.state === "starting";
-  $("app").hidden = !linked;
-  if (!linked && st.state === "unlinked") {
-    if (prev === "linking") $("qr").replaceChildren(h("button", { class: "btn primary", onclick: startLink }, "Show a new QR code"));
+  S.accounts = st.accounts || [];
+  if (S.addingAccount && st.last_linked && st.last_linked.gen === S.linkGen) {
+    S.addingAccount = false;
+    switchAccount(st.last_linked.account);
+  }
+  if ((S.addingAccount || !S.accounts.length) && prev?.linking && !st.linking) {
+    $("qr").replaceChildren(h("button", { class: "btn primary", onclick: startLink }, "Show a new QR code"));
     $("link-msg").textContent = st.link_error ? "Linking didn't finish: " + st.link_error : "";
   }
-  if (st.state === "ready" && prev !== "ready") {
-    loadConversations().then(() => {
-      const fromHash = decodeURIComponent(location.hash.slice(1));
-      if (fromHash && !S.current) openConversation(fromHash);
-      else if (S.current) openConversation(S.current);
-    });
+  if (S.accounts.length && !accountById(S.account)) {
+    // first load, or the shown account is gone: hash, then last used, then the first one
+    const want = parseHash(), saved = lsGet("account");
+    const pick = accountById(want.a) || accountById(saved) || S.accounts[0];
+    switchAccount(pick.id, pick.id === want.a ? want.c : null);
+  } else if (st.state === "ready" && prev && prev.state !== "ready" && S.account) {
+    loadConversations().then(() => S.current && openConversation(S.current));
   }
+  renderScreens();
+  renderAccounts();
   renderBanner();
+}
+
+// ------------------------------------------------------------------ accounts
+function lsGet(k) { try { return localStorage.getItem(k); } catch (_) { return null; } }
+function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (_) {} }
+function accountById(id) { return id ? S.accounts.find((a) => a.id === id) : undefined; }
+function accountLabel(a) { return a ? a.name || a.number || "Signal account" : "Signal account"; }
+function otherUnread() { return S.accounts.reduce((n, a) => n + (a.id === S.account ? 0 : a.unread || 0), 0); }
+function parseHash() {
+  const raw = location.hash.slice(1);
+  if (!raw) return {};
+  const p = new URLSearchParams(raw);
+  if (p.has("a") || p.has("c")) return { a: p.get("a"), c: p.get("c") };
+  return { c: decodeURIComponent(raw) }; // links from before multi-account
+}
+function setHash() {
+  const p = new URLSearchParams();
+  if (S.account) p.set("a", S.account);
+  if (S.current) p.set("c", S.current);
+  history.replaceState(null, "", S.account ? "#" + p.toString() : location.pathname);
+}
+function accountAvatar(a, size = "sm") {
+  const el = h("div", { class: `avatar ${size}` });
+  el.style.background = colorFor("acct:" + a.id);
+  el.append(a.name ? initials(a.name) : "#");
+  const img = h("img", { alt: "", loading: "lazy", src: `${abase(a.id)}/avatars/u:self` });
+  img.addEventListener("error", () => img.remove());
+  img.addEventListener("load", () => { if (!img.naturalWidth) img.remove(); });
+  el.append(img);
+  return el;
+}
+function closeThread() {
+  stopTyping();
+  S.current = null; S.replyTo = S.editing = null; S.files = [];
+  $("app").classList.remove("in-thread");
+  $("empty-thread").hidden = false;
+  $("thread-head").hidden = $("messages").hidden = $("composer").hidden = true;
+  $("details").hidden = true;
+  $("input").value = "";
+  renderComposerContext(); renderPendingFiles();
+  setHash();
+}
+async function switchAccount(id, convId) {
+  closeAccountMenu();
+  if (S.account !== id) {
+    if (S.account) closeThread();
+    S.account = id;
+    lsSet("account", id);
+    S.convs.clear(); S.msgs.clear(); S.hasMore.clear(); S.typing.clear(); nameCache.clear();
+    S.searchHits = []; S.searchTerm = ""; $("search").value = ""; contactsCache = null;
+    S.showArchived = false; $("archive-btn").classList.remove("active"); $("side-title").textContent = "Messages";
+    renderConvList();
+    setHash();
+  }
+  renderAccounts();
+  try { await loadConversations(); } catch (e) { toast(e.message); return; }
+  if (convId && S.account === id) openConversation(convId);
+  refreshAccounts();
+}
+function renderAccounts() {
+  const cur = accountById(S.account);
+  const btn = $("account-btn");
+  if (!cur) { btn.hidden = true; return; }
+  btn.hidden = false;
+  btn.title = `${accountLabel(cur)}${cur.number && cur.name ? " (" + cur.number + ")" : ""} · switch or add account`;
+  btn.replaceChildren(accountAvatar(cur));
+  if (otherUnread()) btn.append(h("span", { class: "acct-dot", title: "Unread messages in another account" }));
+  const sub = $("side-account");
+  sub.hidden = S.accounts.length < 2;
+  sub.textContent = cur.name && cur.number ? `${cur.name} · ${cur.number}` : accountLabel(cur);
+  updateTitle();
+}
+let accountsTimer = null;
+function refreshAccounts() {
+  // Unread counts for the accounts not on screen; debounced because events come in bursts.
+  clearTimeout(accountsTimer);
+  accountsTimer = setTimeout(async () => {
+    try { S.accounts = await api("/accounts"); renderAccounts(); } catch (_) {}
+  }, 300);
+}
+function closeAccountMenu() { $("account-menu").hidden = true; }
+function openAccountMenu() {
+  closeMenu();
+  const menu = $("account-menu");
+  const items = S.accounts.map((a) => h("button", { class: "item acct" + (a.id === S.account ? " current" : ""), role: "menuitem", onclick: () => switchAccount(a.id) },
+    accountAvatar(a, "md"),
+    h("div", { class: "acct-text" },
+      h("div", { class: "acct-name" }, accountLabel(a)),
+      h("div", { class: "acct-sub" }, a.linked === false ? "Not linked · history only" : (a.name ? a.number || "" : ""))),
+    a.id !== S.account && a.unread ? h("span", { class: "badge" }, a.unread > 99 ? "99+" : a.unread) : null,
+    a.id === S.account ? icon("check") : null));
+  items.push(h("div", { class: "menu-sep" }),
+    h("button", { class: "item", role: "menuitem", onclick: () => { closeAccountMenu(); showLinkScreen(true); } }, icon("add"), "Link another account"));
+  menu.replaceChildren(...items);
+  menu.hidden = false;
+  const r = $("account-btn").getBoundingClientRect();
+  menu.style.top = r.bottom + 6 + "px";
+  menu.style.left = Math.max(8, Math.min(window.innerWidth - menu.offsetWidth - 8, r.right - menu.offsetWidth)) + "px";
+  refreshAccounts();
 }
 
 // ------------------------------------------------------------------ websocket
@@ -854,7 +1004,7 @@ function connectWs() {
   ws.onopen = () => {
     const reconnect = wsBackoff > 1000 || S.status;
     wsOpen = true; wsBackoff = 1000; renderBanner();
-    if (reconnect && S.status?.state === "ready") {
+    if (reconnect && S.account) {
       // catch up on anything missed while disconnected
       loadConversations().then(() => S.current && openConversation(S.current));
     }
@@ -869,6 +1019,12 @@ function connectWs() {
 setInterval(() => { if (ws && ws.readyState === 1) ws.send("ping"); }, 25000);
 
 function handleEvent(ev) {
+  if (ev.account && ev.account !== S.account) {
+    // Another account: keep its unread badge current and still notify.
+    if (ev.type === "message" && !ev.message.outgoing) maybeNotify(ev.message, ev.account);
+    if (ev.type !== "typing") refreshAccounts();
+    return;
+  }
   switch (ev.type) {
     case "status": applyStatus(ev.status); break;
     case "conversation": {
@@ -876,6 +1032,7 @@ function handleEvent(ev) {
       S.convs.set(c.id, c); cacheName(c);
       renderConvList();
       if (c.id === S.current) { renderThreadHeader(); if (c.unread) markReadSoon(); }
+      refreshAccounts();
       break;
     }
     case "conversations_changed": loadConversations(); break;
@@ -886,7 +1043,7 @@ function handleEvent(ev) {
         if (!m.outgoing) { const t = S.typing.get(m.conversation_id); if (t && t.has(m.author)) { clearTimeout(t.get(m.author).timer); t.delete(m.author); renderThreadHeader(); } }
         renderMessages();
       }
-      if (!known && !m.outgoing) maybeNotify(m);
+      if (!known && !m.outgoing) maybeNotify(m, S.account);
       break;
     }
     case "message_removed": removeMessage(ev.conversation_id, ev.id); break;
@@ -912,6 +1069,8 @@ function wire() {
   renderNotifBtn();
 
   $("link-btn").addEventListener("click", startLink);
+  $("link-cancel").addEventListener("click", cancelAddAccount);
+  $("account-btn").addEventListener("click", (e) => { e.stopPropagation(); $("account-menu").hidden ? openAccountMenu() : closeAccountMenu(); });
   $("notif-btn").addEventListener("click", toggleNotify);
   $("archive-btn").addEventListener("click", () => {
     S.showArchived = !S.showArchived;
@@ -919,12 +1078,12 @@ function wire() {
     $("side-title").textContent = S.showArchived ? "Archived" : "Messages";
     renderConvList();
   });
-  $("back-btn").addEventListener("click", () => { $("app").classList.remove("in-thread"); S.current = null; history.replaceState(null, "", location.pathname); renderConvList(); });
+  $("back-btn").addEventListener("click", () => { $("app").classList.remove("in-thread"); S.current = null; setHash(); renderConvList(); });
   $("thread-info").addEventListener("click", showDetails);
   $("details-close").addEventListener("click", () => { $("details").hidden = true; });
   $("thread-archive").addEventListener("click", async () => {
     const c = S.convs.get(S.current); if (!c) return;
-    await api(`/conversations/${enc(c.id)}/archive`, { json: { archived: !c.archived } });
+    await aapi(`/conversations/${enc(c.id)}/archive`, { json: { archived: !c.archived } });
   });
   $("new-chat-btn").addEventListener("click", openNewChat);
   $("new-chat-input").addEventListener("input", renderPickList);
@@ -942,7 +1101,7 @@ function wire() {
     renderConvList();
     searchTimer = setTimeout(async () => {
       const q = S.searchTerm.trim();
-      try { const hits = await api(`/search?q=${encodeURIComponent(q)}`); if (q === S.searchTerm.trim()) { S.searchHits = hits; renderConvList(); } } catch (_) {}
+      try { const hits = await aapi(`/search?q=${encodeURIComponent(q)}`); if (q === S.searchTerm.trim()) { S.searchHits = hits; renderConvList(); } } catch (_) {}
     }, 250);
   });
 

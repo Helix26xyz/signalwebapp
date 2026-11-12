@@ -15,26 +15,31 @@
   <!-- Shown until a Signal account is linked -->
   <section id="link-screen" class="link-screen" hidden>
     <div class="link-card">
-      <h1>Link Signal Web to your account</h1>
+      <h1 id="link-title">Link Signal Web to your account</h1>
       <p class="muted">This app is a <strong>linked device</strong>, just like your second phone. It gets every
         message from the moment it's linked; older history stays on your phones.</p>
       <ol>
-        <li>On your main phone open Molly / Signal → <strong>Settings → Linked devices</strong>.</li>
+        <li>On the main phone of the account you want to add, open Molly / Signal → <strong>Settings → Linked devices</strong>.</li>
         <li>Tap <strong>Link new device</strong> (the <strong>+</strong> button).</li>
         <li>Scan the QR code below.</li>
       </ol>
       <div id="qr" class="qr"><button id="link-btn" class="btn primary">Show QR code</button></div>
       <p id="link-msg" class="muted small"></p>
+      <div class="link-actions"><button id="link-cancel" class="btn" hidden>Cancel</button></div>
     </div>
   </section>
 
   <main id="app" class="app" hidden>
     <aside class="sidebar" id="sidebar">
       <header class="side-head">
-        <h1 id="side-title">Messages</h1>
+        <div class="side-titles">
+          <h1 id="side-title">Messages</h1>
+          <div class="side-sub" id="side-account" hidden></div>
+        </div>
         <div class="side-actions">
           <button class="icon-btn" id="notif-btn" title="Desktop notifications"></button>
           <button class="icon-btn" id="archive-btn" title="Archived conversations"></button>
+          <button class="icon-btn account-btn" id="account-btn" title="Accounts" aria-haspopup="menu" hidden></button>
         </div>
       </header>
       <div class="search-wrap">
@@ -104,6 +109,7 @@
 
   <!-- Message actions -->
   <div class="menu" id="msg-menu" hidden role="menu"></div>
+  <div class="menu account-menu" id="account-menu" hidden role="menu"></div>
   <div class="lightbox" id="lightbox" hidden><img id="lightbox-img" alt=""><button class="icon-btn" id="lightbox-close" title="Close"></button></div>
 
   <script src="/static/app.js"></script>

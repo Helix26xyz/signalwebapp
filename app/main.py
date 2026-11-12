@@ -2,6 +2,10 @@
 
 No authentication here on purpose: put it behind your reverse proxy / auth layer, or add
 a dependency to `api` (and a check in `websocket_endpoint`).
+
+Routes about one Signal account live under /api/accounts/{acct}/..., where {acct} is the account's
+phone number (or ACI if it has none). /api/status, /api/link and /ws are shared by all accounts;
+WebSocket events carry an "account" field.
 """
 
 from __future__ import annotations
@@ -14,14 +18,14 @@ from pathlib import Path
 from urllib.parse import quote
 
 import segno
-from fastapi import APIRouter, FastAPI, File, Form, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .config import Settings
 from .rpc import RpcError
-from .service import SignalService, Upload
+from .service import Account, SignalService, Upload
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO").upper(),
@@ -63,6 +67,13 @@ class Delete(BaseModel):
     everyone: bool = False
 
 
+def get_account(request: Request, acct: str) -> Account:
+    account = request.app.state.service.account(acct)
+    if account is None:
+        raise HTTPException(404, "account not found")
+    return account
+
+
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings()
@@ -79,12 +90,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(title="Signal Web", lifespan=lifespan)
     api = APIRouter(prefix="/api")
+    acct_api = APIRouter(prefix="/api/accounts/{acct}")
 
     def svc(request: Request) -> SignalService:
         return request.app.state.service
 
-    def conv_or_404(service: SignalService, conv_id: str) -> dict:
-        conv = service.store.conversation(conv_id)
+    def conv_or_404(account: Account, conv_id: str) -> dict:
+        conv = account.store.conversation(conv_id)
         if not conv:
             raise HTTPException(404, "conversation not found")
         return conv
@@ -97,28 +109,36 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def conn_error(_: Request, exc: ConnectionError):
         return JSONResponse({"detail": str(exc) or "signal-cli unavailable"}, status_code=503)
 
-    # ---------------------------------------------------------------- status / linking
+    # ---------------------------------------------------------------- status / accounts / linking
 
     @api.get("/status")
     async def status(request: Request):
         return svc(request).status()
 
+    @api.get("/accounts")
+    async def accounts(request: Request):
+        return [a.summary() for a in svc(request).accounts.values()]
+
     @api.post("/link")
     async def link(request: Request):
-        uri = await svc(request).start_link()
-        qr = segno.make(uri, error="m")
-        return {"uri": uri, "qr_svg": qr.svg_inline(border=2, dark="#000", light="#fff", omitsize=True)}
+        started = await svc(request).start_link()
+        qr = segno.make(started["uri"], error="m")
+        return {**started, "qr_svg": qr.svg_inline(border=2, dark="#000", light="#fff", omitsize=True)}
+
+    @api.delete("/link")
+    async def cancel_link(request: Request):
+        await svc(request).cancel_link()
+        return {"ok": True}
 
     # ---------------------------------------------------------------- conversations
 
-    @api.get("/conversations")
-    async def conversations(request: Request, archived: bool = False):
-        return svc(request).store.list_conversations(include_archived=archived)
+    @acct_api.get("/conversations")
+    async def conversations(archived: bool = False, account: Account = Depends(get_account)):
+        return account.store.list_conversations(include_archived=archived)
 
-
-    @api.post("/conversations")
-    async def new_conversation(body: NewConversation, request: Request):
-        service = svc(request)
+    @acct_api.post("/conversations")
+    async def new_conversation(body: NewConversation, account: Account = Depends(get_account)):
+        store = account.store
         if body.group_id:
             conv_id = f"g:{body.group_id}"
         elif body.recipient:
@@ -127,34 +147,34 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if not re.fullmatch(r"\+\d{6,15}", r):
                     raise HTTPException(400, "Use a phone number in international format, e.g. +15551234567")
                 number = r
-                r = service.store.rid_for_number(number) or number
+                r = store.rid_for_number(number) or number
                 if r == number:
-                    service.store.upsert_recipient(r, number=number)
-            elif r != "self" and not service.store.recipient(r):
+                    store.upsert_recipient(r, number=number)
+            elif r != "self" and not store.recipient(r):
                 raise HTTPException(400, "Use a phone number in international format, e.g. +15551234567")
             conv_id = f"u:{r}"
         else:
             raise HTTPException(400, "recipient or group_id required")
-        service.store.ensure_conversation(conv_id)
-        return service.store.conversation(conv_id)
+        store.ensure_conversation(conv_id)
+        return store.conversation(conv_id)
 
-    @api.get("/conversations/{conv_id:path}/messages")
-    async def messages(request: Request, conv_id: str, before: int | None = None, limit: int = Query(50, le=200)):
-        service = svc(request)
-        conv_or_404(service, conv_id)
-        return service.store.messages(conv_id, before=before, limit=limit)
+    @acct_api.get("/conversations/{conv_id:path}/messages")
+    async def messages(
+        conv_id: str, before: int | None = None, limit: int = Query(50, le=200), account: Account = Depends(get_account)
+    ):
+        conv_or_404(account, conv_id)
+        return account.store.messages(conv_id, before=before, limit=limit)
 
-    @api.post("/conversations/{conv_id:path}/messages")
+    @acct_api.post("/conversations/{conv_id:path}/messages")
     async def send(
-        request: Request,
         conv_id: str,
         text: str = Form(""),
         quote_id: int | None = Form(None),
         edit_id: int | None = Form(None),
         files: list[UploadFile] = File(default=[]),
+        account: Account = Depends(get_account),
     ):
-        service = svc(request)
-        conv = conv_or_404(service, conv_id)
+        conv = conv_or_404(account, conv_id)
         if conv["kind"] == "group" and not conv.get("is_member", True):
             raise HTTPException(400, "You are not a member of this group")
         text = text.strip()
@@ -168,100 +188,84 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not text and not uploads:
             raise HTTPException(400, "Nothing to send")
         try:
-            return await service.send_message(conv_id, text, uploads, quote_id=quote_id, edit_id=edit_id)
+            return await account.send_message(conv_id, text, uploads, quote_id=quote_id, edit_id=edit_id)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
 
-    @api.post("/conversations/{conv_id:path}/read")
-    async def read(request: Request, conv_id: str):
-        service = svc(request)
-        conv_or_404(service, conv_id)
-        await service.mark_read(conv_id)
+    @acct_api.post("/conversations/{conv_id:path}/read")
+    async def read(conv_id: str, account: Account = Depends(get_account)):
+        conv_or_404(account, conv_id)
+        await account.mark_read(conv_id)
         return {"ok": True}
 
-
-    @api.post("/conversations/{conv_id:path}/typing")
-    async def typing(body: Typing, request: Request, conv_id: str):
-        service = svc(request)
-        conv_or_404(service, conv_id)
-        await service.send_typing(conv_id, body.started)
+    @acct_api.post("/conversations/{conv_id:path}/typing")
+    async def typing(body: Typing, conv_id: str, account: Account = Depends(get_account)):
+        conv_or_404(account, conv_id)
+        await account.send_typing(conv_id, body.started)
         return {"ok": True}
 
-
-    @api.post("/conversations/{conv_id:path}/archive")
-    async def archive(body: Archive, request: Request, conv_id: str):
-        service = svc(request)
-        conv_or_404(service, conv_id)
-        service.store.set_archived(conv_id, body.archived)
-        conv = service.store.conversation(conv_id)
-        await service.hub.broadcast({"type": "conversation", "conversation": conv})
+    @acct_api.post("/conversations/{conv_id:path}/archive")
+    async def archive(body: Archive, conv_id: str, account: Account = Depends(get_account)):
+        conv_or_404(account, conv_id)
+        account.store.set_archived(conv_id, body.archived)
+        conv = account.store.conversation(conv_id)
+        await account.broadcast({"type": "conversation", "conversation": conv})
         return conv
 
-    @api.get("/conversations/{conv_id:path}")
-    async def conversation(request: Request, conv_id: str):
-        service = svc(request)
-        conv = conv_or_404(service, conv_id)
+    @acct_api.get("/conversations/{conv_id:path}")
+    async def conversation(conv_id: str, account: Account = Depends(get_account)):
+        conv = conv_or_404(account, conv_id)
         if conv["kind"] == "group":
-            g = service.store.group(conv["peer"]) or {}
+            g = account.store.group(conv["peer"]) or {}
             conv["description"] = g.get("description")
             conv["members"] = [
-                {"rid": m, "name": service.store.display_name(m)} for m in g.get("members") or []
+                {"rid": m, "name": account.store.display_name(m)} for m in g.get("members") or []
             ]
         return conv
 
     # ---------------------------------------------------------------- messages
 
-
-    @api.post("/messages/{msg_id}/react")
-    async def react(body: Reaction, request: Request, msg_id: int):
+    @acct_api.post("/messages/{msg_id}/react")
+    async def react(body: Reaction, msg_id: int, account: Account = Depends(get_account)):
         try:
-            await svc(request).react(msg_id, body.emoji, body.remove)
+            await account.react(msg_id, body.emoji, body.remove)
         except KeyError as exc:
             raise HTTPException(404, "message not found") from exc
         return {"ok": True}
 
-
-    @api.post("/messages/{msg_id}/delete")
-    async def delete(body: Delete, request: Request, msg_id: int):
-        service = svc(request)
+    @acct_api.post("/messages/{msg_id}/delete")
+    async def delete(body: Delete, msg_id: int, account: Account = Depends(get_account)):
         try:
             if body.everyone:
-                await service.delete_for_everyone(msg_id)
+                await account.delete_for_everyone(msg_id)
             else:
-                await service.delete_locally(msg_id)
+                await account.delete_locally(msg_id)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         return {"ok": True}
 
-    @api.get("/search")
-    async def search(request: Request, q: str = Query(..., min_length=2)):
-        return svc(request).store.search(q)
+    @acct_api.get("/search")
+    async def search(q: str = Query(..., min_length=2), account: Account = Depends(get_account)):
+        return account.store.search(q)
 
-    @api.get("/contacts")
-    async def contacts(request: Request):
-        service = svc(request)
+    @acct_api.get("/contacts")
+    async def contacts(account: Account = Depends(get_account)):
         people = [
             {"rid": r["id"], "name": r["name"], "number": r.get("number")}
-            for r in service.store.list_recipients()
+            for r in account.store.list_recipients()
             if r.get("contact_name") or r.get("nick_name") or r.get("profile_name")
         ]
-        groups = [
-            {"id": g["id"], "name": g["name"]}
-            for g in (
-                dict(row) for row in service.store._q("SELECT id, name FROM groups WHERE is_member=1 ORDER BY name")
-            )
-        ]
-        return {"people": people, "groups": groups}
+        return {"people": people, "groups": account.store.list_groups()}
 
     # ---------------------------------------------------------------- media
 
-    @api.get("/attachments/{att_id}")
-    async def attachment(request: Request, att_id: str, download: bool = False):
-        found = await svc(request).attachment(att_id)
+    @acct_api.get("/attachments/{att_id}")
+    async def attachment(att_id: str, download: bool = False, account: Account = Depends(get_account)):
+        found = await account.attachment(att_id)
         if not found:
             raise HTTPException(404, "attachment not available")
         content, ct = found
-        meta = svc(request).store.find_attachment(att_id) or {}
+        meta = account.store.find_attachment(att_id) or {}
         filename = meta.get("filename") or att_id
         # The content type comes from the sender. Only render passive media inline; anything else
         # (HTML, SVG, PDF, unknown) is forced to download so it can't run script on our origin.
@@ -273,14 +277,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         headers["Content-Disposition"] = content_disposition(disposition, filename)
         return Response(content, media_type=ct, headers=headers)
 
-    @api.get("/avatars/{conv_id:path}")
-    async def avatar(request: Request, conv_id: str):
-        data = await svc(request).avatar(conv_id)
+    @acct_api.get("/avatars/{conv_id:path}")
+    async def avatar(conv_id: str, account: Account = Depends(get_account)):
+        data = await account.avatar(conv_id)
         if not data:
             return Response(status_code=204, headers={"Cache-Control": "private, max-age=3600"})
         return Response(data, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=3600"})
 
     app.include_router(api)
+    app.include_router(acct_api)
 
     # ---------------------------------------------------------------- live events
 
@@ -300,8 +305,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/healthz")
     async def healthz(request: Request):
-        s = svc(request).status()
-        return JSONResponse(s, status_code=200 if s["state"] in ("ready", "unlinked", "linking") else 503)
+        # Left open by design (README), so it reports only the state: no numbers, names or counts.
+        state = svc(request).status()["state"]
+        return JSONResponse({"state": state}, status_code=200 if state in ("ready", "unlinked") else 503)
 
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
 

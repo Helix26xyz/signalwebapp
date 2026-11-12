@@ -2,7 +2,8 @@
 
 A self-hosted web client for Signal, in the style of Google Messages. It runs as a **linked device**
 on your account (just like your second Molly phone), keeps its own message history in SQLite, and
-stays in sync with your other devices.
+stays in sync with your other devices. You can link **several Signal accounts** (say, personal and
+work numbers) and switch between them.
 
 ```
 Signal servers
@@ -46,6 +47,8 @@ What you can do from the browser:
 - delete for everyone, or just from this app
 - mark as read: sends a read receipt, and signal-cli also sends a read-sync, so your phones clear the badge too
 - typing indicators, search, archive, desktop notifications, dark mode, mobile layout
+- several accounts: switch from the avatar at the top right of the conversation list. A dot there means
+  another account has unread messages; notifications arrive from every account
 
 ## Quick start (Docker)
 
@@ -61,6 +64,16 @@ and groups straight away. New messages start arriving from that moment on.
 On arm64 (Raspberry Pi etc.), set `target: jvm` in `docker-compose.yml`. The native signal-cli
 binary is x86_64 only.
 
+### Adding another account
+
+Click your account avatar at the top right of the conversation list, choose **Link another account**,
+and scan the QR code with the phone of the other account. Each account keeps a separate history.
+
+Under `DATA_DIR`, an account you linked before multi-account support keeps its database at
+`signal-web.db`. Accounts linked since then get `accounts/<number>/`. signal-cli keeps the keys for
+all of them in `signal-cli/`. To stop using an account, remove Signal Web under **Linked devices** on
+that phone. Its history stays readable here, marked "Not linked".
+
 ## Run without Docker
 
 You need [signal-cli](https://github.com/AsamK/signal-cli/releases) on your `PATH` (the native build,
@@ -75,7 +88,7 @@ DATA_DIR=./data .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8080
 
 | Variable | Default | |
 |---|---|---|
-| `DATA_DIR` | `./data` (`/data` in Docker) | SQLite DB, sent-attachment copies, avatar cache |
+| `DATA_DIR` | `./data` (`/data` in Docker) | SQLite DBs (one per account), sent-attachment copies, avatar caches |
 | `SIGNAL_CLI_DATA` | `$DATA_DIR/signal-cli` | signal-cli keys and downloaded attachments |
 | `SIGNAL_CLI_CMD` | `signal-cli` | Command used to spawn signal-cli |
 | `SIGNAL_RPC` | *(empty)* | Set to `tcp://host:port` to use an external `signal-cli daemon --tcp --receive-mode=manual` instead of a child process |
@@ -93,7 +106,7 @@ There is no auth, on purpose. Everything lives under four paths:
 - `/` and `/static/*`: the UI
 - `/api/*`: REST
 - `/ws`: live events (WebSocket)
-- `/healthz`: health check, safe to leave open
+- `/healthz`: health check, safe to leave open (it reports only the state)
 
 With a forward-auth proxy (Authelia, Authentik, oauth2-proxy, Cloudflare Access…), protect
 everything except `/healthz`, and make sure the proxy passes WebSocket upgrades on `/ws`.

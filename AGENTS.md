@@ -6,14 +6,14 @@ file. For project status and the backlog, see [`docs/ROADMAP.md`](docs/ROADMAP.m
 ## What this is
 
 A self-hosted web client for Signal, styled like Google Messages, for one person's homelab. It runs
-as a **linked device** on the owner's account (next to their Molly phones) by driving
+as a **linked device** on one or more of the owner's accounts (next to their Molly phones) by driving
 [signal-cli](https://github.com/AsamK/signal-cli) over JSON-RPC. It stores its own history in SQLite
-and pushes live updates to the browser over a WebSocket.
+(one database per account) and pushes live updates to the browser over a WebSocket.
 
 ```
 Signal servers ─► signal-cli jsonRpc (child process, --receive-mode=manual)
                     │ newline-delimited JSON-RPC over stdin/stdout (or tcp://)
-                  app/rpc.py ─► app/service.py ─► app/ingest.py ─► app/store.py (SQLite)
+                  app/rpc.py ─► app/service.py ─► Account ─► app/ingest.py ─► app/store.py (SQLite, per account)
                     │                        └─► Hub (WebSocket fan-out)
                   app/main.py (FastAPI: REST /api/*, /ws, static UI)
                     │
@@ -26,10 +26,10 @@ Signal servers ─► signal-cli jsonRpc (child process, --receive-mode=manual)
 | `app/rpc.py` | Spawns and supervises signal-cli, matches request ids to responses, queues notifications to one worker so they are handled in order |
 | `app/ingest.py` | **Pure envelope → DB logic.** Returns `Change` records; makes no RPC calls and does no I/O beyond `Store` |
 | `app/store.py` | Schema, queries, decorating rows into API dicts. Re-entrant transactions (savepoints) |
-| `app/service.py` | Linking, outgoing actions (send/react/delete/read/typing), contact and group refresh, attachments, avatars, disappearing-message expiry, `Hub` |
-| `app/main.py` | FastAPI routes; request models are at module level (see Gotchas) |
+| `app/service.py` | `SignalService` (shared: RPC, `Hub`, linking, account discovery, routing envelopes to accounts, expiry loop) and `Account` (per account: outgoing actions, contact/group refresh, attachments, avatars, publishing events) |
+| `app/main.py` | FastAPI routes: shared ones under `/api`, per-account ones under `/api/accounts/{acct}`; request models are at module level (see Gotchas) |
 | `app/static/app.js` | Whole UI: state `S`, the `h()` DOM helper, render functions, WebSocket event handling |
-| `tests/fake_signal_cli.py` | Fake signal-cli speaking the same protocol; logs requests to `$FAKE_LOG` and injects envelopes from `$FAKE_INJECT_DIR` |
+| `tests/fake_signal_cli.py` | Fake signal-cli speaking the same protocol, with two fake accounts; logs requests to `$FAKE_LOG` and injects envelopes from `$FAKE_INJECT_DIR` |
 | `tests/demo.py` | Runs the real app against the fake with seeded conversations |
 
 ## Commands
@@ -48,6 +48,18 @@ Check desktop (1280×800), dark mode (`colorScheme: "dark"`) and mobile (390×78
 `pageerror` events.
 
 ## Core domain rules (read before touching ingest/store/service)
+
+- **Multiple accounts.** One signal-cli process serves every account. Each account has its own
+  `Store` (SQLite file), `Ingestor`, sent-attachment and avatar folders, wrapped in an `Account`.
+  Everything below ("self", rids, conversation ids) is **per account**: the same `u:<rid>` can exist
+  in two accounts' databases. Layout: an install from before multi-account support keeps its history at
+  `DATA_DIR/signal-web.db` (adopted in place, never moved); every account linked since lives in
+  `DATA_DIR/accounts/<digits of number>/`. Each DB records its owner in `meta.account`/`meta.self_ids`,
+  and `SignalService._discover()` opens them at startup.
+- **Routing.** Envelopes are routed by the notification's `account` field. An unknown account gets an
+  `Account` on the spot (a message can arrive before `finishLink` returns). API routes for one account
+  live under `/api/accounts/{acct}` (`acct` = number, or ACI as an alias), via the `get_account`
+  dependency. Every WebSocket event an `Account` sends carries `"account": <key>`. `status` events are global.
 
 - **Identity.** A recipient id (`rid`) is the ACI UUID when known, otherwise the E.164 number.
   The literal `"self"` means this account. Always resolve identities through `Ingestor.rid()`, which
@@ -69,8 +81,8 @@ Check desktop (1280×800), dark mode (`colorScheme: "dark"`) and mobile (390×78
 - **No loss on restart:** signal-cli runs with `--receive-mode=manual`, and we call
   `subscribeReceive` (no account param = all accounts, including ones linked later). Don't switch to
   `on-start`.
-- signal-cli runs in **multi-account mode** (no `-a`); `SignalService.call()` adds `account`. Use
-  `self.rpc.call` directly only for account-less methods (`listAccounts`, `startLink`, `finishLink`,
+- signal-cli runs in **multi-account mode** (no `-a`); `Account.call()` adds `account`. Use
+  `rpc.call` directly only for account-less methods (`listAccounts`, `startLink`, `finishLink`,
   `subscribeReceive`).
 - Notification payloads come wrapped as `{"subscription": n, "result": {...}}` in manual mode;
   `_on_notification` unwraps both shapes.

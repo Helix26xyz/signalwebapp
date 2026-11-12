@@ -30,6 +30,12 @@ downloaded signal-cli binary).
       dark mode, mobile layout, linking screen
 - [x] Dockerfile (native x86_64 + JVM arm64 targets), docker-compose, README
 - [x] Tests: 11 ingest unit tests + 1 end-to-end flow against `tests/fake_signal_cli.py`; demo mode
+- [x] **Multiple Signal accounts** (2026-11-12): one signal-cli process, one SQLite DB + file folders per
+      account (`DATA_DIR/accounts/<number>/`; an existing `DATA_DIR/signal-web.db` is adopted in place),
+      routes under `/api/accounts/{acct}`, events tagged with `account`, account switcher with
+      cross-account unread dot and notifications, "Link another account". Tested against the fake
+      (`test_multiple_accounts`) and a copy of the owner's real single-account DB; **linking a second
+      real account is unverified**
 
 ## P0: prove it against real Signal
 
@@ -76,6 +82,14 @@ downloaded signal-cli binary).
 
 ## P2: feature parity with a real chat app
 
+- [ ] Multi-account follow-ups: "Remove account" (signal-cli `deleteLocalAccountData` after the owner
+      removes the device on their phone, then delete its folder, with a confirm; check the signal-cli
+      docs for how a linked device unlinks itself); per-account notification mute;
+      detect a remote unlink (signal-cli errors with "not registered") and show it on the account
+- [ ] Verify against real signal-cli that `subscribeReceive` (no account param) delivers envelopes for an
+      account linked *after* the subscription, and that `getAvatar {profile: <own number>}` returns
+      your own picture (used by the account switcher; it falls back to initials)
+
 - [ ] Sending @mentions in groups (composer autocomplete → `mention` param)
 - [ ] Sticker rendering (`getSticker`) and sending
 - [ ] Voice notes: record in the browser (MediaRecorder), send with `voiceNote`
@@ -92,7 +106,8 @@ downloaded signal-cli binary).
 
 ## P3: robustness and tech debt
 
-- [ ] Schema migrations (`PRAGMA user_version` + ordered migration functions)
+- [ ] Schema migrations (`PRAGMA user_version` + ordered migration functions). Must run per account DB.
+      Once they exist, consider moving a legacy `DATA_DIR/signal-web.db` into `accounts/<number>/`
 - [ ] Move SQLite off the event loop (`asyncio.to_thread` or a dedicated writer thread); keep ingest ordering
 - [ ] `Hub.broadcast`: send to clients concurrently with a timeout so one slow tab can't stall ingest
 - [ ] `find_attachment` uses a `LIKE` scan over JSON. Add an `attachments` table indexed by id
@@ -102,7 +117,7 @@ downloaded signal-cli binary).
 - [ ] Handle the WebSocket reconnect catch-up incrementally (an `after` cursor) instead of full reloads
 - [ ] Conversation list pagination for very large accounts
 - [ ] Avatar endpoint: sniff the real content type instead of always `image/jpeg`
-- [ ] `/api/contacts` uses `store._q` directly. Add a `Store.list_groups()`
+- [x] `/api/contacts` uses `store._q` directly. Add a `Store.list_groups()`
 - [ ] Silence the Starlette TestClient deprecation warning (pin/upgrade)
 - [ ] Health check that alerts when signal-cli hasn't received anything for N days (the device is
       unlinked after about 30 days offline)

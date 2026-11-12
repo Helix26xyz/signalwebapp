@@ -1,6 +1,7 @@
 """Run the UI against the fake signal-cli with some seeded conversations (no Signal account needed).
 
     python -m tests.demo            # then open http://localhost:8080
+    DEMO_ACCOUNTS=1 python -m tests.demo   # only one linked account (default: two)
 """
 
 import json
@@ -14,6 +15,8 @@ from pathlib import Path
 import uvicorn
 
 ME = ("aaaaaaaa-0000-4000-8000-000000000001", "+15550000001")
+WORK = ("99999999-0000-4000-8000-000000000009", "+15550000009")
+DAN = ("eeeeeeee-0000-4000-8000-000000000005", "+15550000005")
 ALICE = ("bbbbbbbb-0000-4000-8000-000000000002", "+15550000002")
 BOB = ("cccccccc-0000-4000-8000-000000000003", "+15550000003")
 CARA = ("dddddddd-0000-4000-8000-000000000004", "+15550000004")
@@ -21,15 +24,15 @@ NAMES = {BOB[0]: "Bob Martin", CARA[0]: "Cara Lee"}
 GID = "R3JvdXAxMjM0NTY3ODkwMTIzNDU2Nzg5MDEyMzQ1Njc4OTA="
 
 
-def seed(inject: Path) -> None:
+def seed(inject: Path, accounts: int) -> None:
     n = iter(range(10**6))
     now = int(time.time() * 1000)
     group = {"groupId": GID, "groupName": "Family", "revision": 1, "type": "DELIVER"}
 
-    def push(src, ts, **body):
+    def push(src, ts, account=ME, **body):
         f = inject / f"{next(n):06d}.json"
         env = {"sourceUuid": src[0], "sourceNumber": src[1], "sourceName": NAMES.get(src[0], ""), "timestamp": ts, "serverReceivedTimestamp": ts, **body}
-        f.with_suffix(".tmp").write_text(json.dumps({"envelope": env}))
+        f.with_suffix(".tmp").write_text(json.dumps({"envelope": env, "account": account[1]}))
         f.with_suffix(".tmp").rename(f)
 
     def me(ts, dest=None, **msg):
@@ -62,6 +65,13 @@ def seed(inject: Path) -> None:
     me(now - 5 * day, ME, message="Wifi password: correct-horse-battery-staple")
     push(CARA, now - 4 * day, dataMessage={"timestamp": now - 4 * day, "message": "Thanks for the book recommendation!"})
 
+    if accounts < 2:
+        return
+    t = now - 5 * 3600000
+    push(DAN, t, WORK, dataMessage={"timestamp": t, "message": "Can you review the Q3 deck before 3?"})
+    push(WORK, t + 60000, WORK, syncMessage={"sentMessage": {"timestamp": t + 60000, "destinationUuid": DAN[0], "destinationNumber": DAN[1], "message": "On it"}})
+    push(DAN, now - 7 * 60000, WORK, dataMessage={"timestamp": now - 7 * 60000, "message": "Thanks! Slide 12 still has last year's numbers"})
+
 
 def main() -> None:
     tmp = Path(tempfile.mkdtemp(prefix="signal-web-demo-"))
@@ -76,8 +86,10 @@ def main() -> None:
     accounts = tmp / "data" / "signal-cli"
     accounts.mkdir(parents=True)
     if os.environ.get("DEMO_UNLINKED") != "1":
-        (accounts / "fake-accounts.json").write_text(json.dumps([{"number": ME[1], "aci": ME[0]}]))
-        threading.Timer(2.0, seed, args=(inject,)).start()
+        n_accounts = int(os.environ.get("DEMO_ACCOUNTS", "2"))
+        linked = [{"number": a[1], "aci": a[0]} for a in (ME, WORK)[:n_accounts]]
+        (accounts / "fake-accounts.json").write_text(json.dumps(linked))
+        threading.Timer(2.0, seed, args=(inject, n_accounts)).start()
     from app.main import create_app
 
     print(f"demo data in {tmp}")
