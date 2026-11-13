@@ -74,6 +74,41 @@ Under `DATA_DIR`, an account you linked before multi-account support keeps its d
 all of them in `signal-cli/`. To stop using an account, remove Signal Web under **Linked devices** on
 that phone. Its history stays readable here, marked "Not linked".
 
+## Sending messages from webhooks
+
+For alerts from monitoring, backups, home automation and so on. A small **webhook relay** runs as
+its own process (the `signal-web-webhook` service in `docker-compose.yml`, port 8081), so your
+webhook system can reach it without reaching the main app.
+
+1. In Signal Web, open the account menu (your avatar, top right) → **Webhook sending…**, tick
+   **Allow webhook sending** for the number that should send, and copy the token. Nothing can send
+   as a number until you do this, and unticking it stops it immediately.
+2. Point your webhook at the relay:
+
+```bash
+curl -X POST http://YOUR-HOST:8081/send \
+  -H "Authorization: Bearer swh_..." \
+  -H "Content-Type: application/json" \
+  -d '{"recipient": "+15551234567", "message": "Backup finished"}'
+```
+
+- `recipient`: a number in international format, `"self"` (your Note to Self, handy for alerts to
+  yourself), or a contact's UUID. Use `group_id` instead to send to a group.
+- The token picks the sending number; each account has its own. Also accepted: `X-Webhook-Token`
+  header or `?token=` (for senders that can't set headers), `to`/`text` as field names, form data,
+  or a `text/plain` body with `?to=...` in the URL.
+- Answers `200 {"ok": true, "message_id": …}` on success; `401` unknown token, `403` sending turned
+  off for that account, `400` bad input, `502` Signal refused, `503` Signal Web unreachable. While
+  the main app is unreachable (e.g. restarting) the relay keeps retrying for `WEBHOOK_RETRY_SECONDS`.
+- Sent messages show up in the conversation like any other you send.
+
+Relay settings: `WEBHOOK_HOST` (`0.0.0.0`), `WEBHOOK_PORT` (`8081`), `SIGNAL_WEB_URL` (how the relay
+reaches the main app directly, default `http://127.0.0.1:8080`; `http://signal-web:8080` in compose),
+`WEBHOOK_RETRY_SECONDS` (`30`). Without Docker: `python -m app.webhook`.
+
+The token can send messages as your number: treat it like a password, and keep port 8081 off the
+internet unless something like your reverse proxy restricts who can reach it.
+
 ## Run without Docker
 
 You need [signal-cli](https://github.com/AsamK/signal-cli/releases) on your `PATH` (the native build,
@@ -101,7 +136,8 @@ DATA_DIR=./data .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8080
 
 ## Adding auth
 
-There is no auth, on purpose. Everything lives under four paths:
+There is no auth, on purpose. Everything lives under four paths (plus the webhook relay on its own
+port, which checks its own tokens):
 
 - `/` and `/static/*`: the UI
 - `/api/*`: REST
@@ -147,4 +183,5 @@ you can work on the UI without touching a real account.
 | `app/store.py` | SQLite schema and queries |
 | `app/service.py` | Linking, sending, read receipts, attachments, avatars, disappearing-message timers, WebSocket fan-out |
 | `app/main.py` | FastAPI routes |
+| `app/webhook.py` | Webhook relay (separate process) |
 | `app/static/` | UI: `index.html`, `app.css`, `app.js` |

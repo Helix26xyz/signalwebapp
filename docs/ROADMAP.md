@@ -37,6 +37,12 @@ downloaded signal-cli binary).
       (`test_multiple_accounts`) and a copy of the owner's real single-account DB. The owner linked a
       second real account and it works, including updates for the account not on screen
 
+- [x] **Webhook sending** (2026-11-13): per-account opt-in and token in the GUI (account menu →
+      Webhook sending), `POST /api/hooks/send`, and a stateless relay process (`app/webhook.py`,
+      compose service `signal-web-webhook`, port 8081) that accepts JSON/form/text and retries while
+      the app is unreachable. Tested end to end against the fake, plus a manual curl through the
+      real relay process
+
 ## P0: prove it against real Signal
 
 - [ ] Build both Docker targets (`native`, `jvm`) and fix whatever breaks. *`native` builds and runs
@@ -79,6 +85,8 @@ downloaded signal-cli binary).
 - [x] Attachments: force `Content-Disposition: attachment` for HTML/SVG/unknown content types so the
       browser never renders them inline (only passive image/video/audio types are inline; `nosniff` set)
 - [ ] Rate-limit and size-check uploads before reading them fully into memory
+- [ ] Webhook relay: per-token rate limit (a leaked token can spam from your number until you
+      regenerate it); optional recipient allowlist per account; attachments via webhook
 
 ## P2: feature parity with a real chat app
 

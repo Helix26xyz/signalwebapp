@@ -81,3 +81,22 @@ class Settings:
         # or when the daemon's data dir is mounted; otherwise we fall back to getAttachment).
         assert self.signal_cli_data is not None
         return self.signal_cli_data / "attachments"
+
+
+@dataclass
+class RelaySettings:
+    """Settings for the webhook relay process (`python -m app.webhook`)."""
+
+    # Where the relay listens for webhooks. Expose this port to your webhook system, not 8080.
+    host: str = field(default_factory=lambda: os.environ.get("WEBHOOK_HOST", "0.0.0.0"))
+    port: int = field(default_factory=lambda: int(os.environ.get("WEBHOOK_PORT", "8081")))
+
+    # How the relay reaches the main app, directly (not through your auth proxy).
+    signal_web_url: str = field(
+        default_factory=lambda: os.environ.get("SIGNAL_WEB_URL", "http://127.0.0.1:8080").rstrip("/")
+    )
+
+    # Keep retrying for this long when the main app is unreachable (e.g. during a restart).
+    retry_seconds: float = field(default_factory=lambda: float(os.environ.get("WEBHOOK_RETRY_SECONDS", "30")))
+
+    max_body_bytes: int = 64 * 1024

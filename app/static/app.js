@@ -31,6 +31,7 @@ const ICONS = {
   note: "M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-2 10H7v-2h10v2zm0-4H7V7h10v2zm-3 8H7v-2h7v2z",
   download: "M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z",
   add: "M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z",
+  link: "M3.9 12c0-1.71 1.39-3.1 3.1-3.1h4V7H7c-2.76 0-5 2.24-5 5s2.24 5 5 5h4v-1.9H7c-1.71 0-3.1-1.39-3.1-3.1zM8 13h8v-2H8v2zm9-6h-4v1.9h4c1.71 0 3.1 1.39 3.1 3.1s-1.39 3.1-3.1 3.1h-4V17h4c2.76 0 5-2.24 5-5s-2.24-5-5-5z",
 };
 function icon(name) {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -987,6 +988,7 @@ function openAccountMenu() {
     a.id !== S.account && a.unread ? h("span", { class: "badge" }, a.unread > 99 ? "99+" : a.unread) : null,
     a.id === S.account ? icon("check") : null));
   items.push(h("div", { class: "menu-sep" }),
+    h("button", { class: "item", role: "menuitem", onclick: openWebhookDialog }, icon("link"), "Webhook sending…"),
     h("button", { class: "item", role: "menuitem", onclick: () => { closeAccountMenu(); showLinkScreen(true); } }, icon("add"), "Link another account"));
   menu.replaceChildren(...items);
   menu.hidden = false;
@@ -994,6 +996,55 @@ function openAccountMenu() {
   menu.style.top = r.bottom + 6 + "px";
   menu.style.left = Math.max(8, Math.min(window.innerWidth - menu.offsetWidth - 8, r.right - menu.offsetWidth)) + "px";
   refreshAccounts();
+}
+
+// ------------------------------------------------------------------ webhook sending
+// Lets the webhook relay (python -m app.webhook) send as the current account. The server refuses
+// relay requests for an account unless it's enabled here; the token says which account sends.
+const webhookUI = { acct: null, hook: null, reveal: false };
+async function openWebhookDialog() {
+  closeAccountMenu();
+  Object.assign(webhookUI, { acct: S.account, hook: null, reveal: false });
+  renderWebhook();
+  $("webhook-dlg").showModal();
+  try { webhookUI.hook = await aapi("/webhook"); renderWebhook(); } catch (e) { toast(e.message); }
+}
+async function updateWebhook(body) {
+  try { webhookUI.hook = await api(abase(webhookUI.acct).slice(4) + "/webhook", { method: "PUT", json: body }); }
+  catch (e) { toast("Couldn't save: " + e.message); }
+  renderWebhook();
+}
+function copyText(text, input) {
+  const done = () => toast("Copied");
+  if (navigator.clipboard && window.isSecureContext) return navigator.clipboard.writeText(text).then(done, () => toast("Copy failed"));
+  // Plain-http LAN pages have no clipboard API: fall back to selecting the field.
+  input.type = "text"; input.select();
+  try { document.execCommand("copy"); done(); } catch (_) { toast("Select the token and copy it"); }
+}
+function renderWebhook() {
+  const { hook, reveal } = webhookUI;
+  const label = accountLabel(accountById(webhookUI.acct));
+  const kids = [h("p", { class: "muted" }, `Lets your webhook system send Signal messages as ${label} through the webhook relay. They appear here like any message you send.`)];
+  if (!hook) { kids.push(h("p", { class: "muted" }, "Loading…")); $("webhook-body").replaceChildren(...kids); return; }
+  const toggle = h("input", { type: "checkbox", id: "webhook-enabled", checked: hook.enabled, onchange: (e) => updateWebhook({ enabled: e.target.checked }) });
+  kids.push(h("label", { class: "switch-row", for: "webhook-enabled" }, toggle, h("span", {}, `Allow webhook sending from ${label}`)));
+  if (hook.token) {
+    const field = h("input", { class: "token", readonly: true, type: reveal ? "text" : "password", value: hook.token, "aria-label": "Webhook token" });
+    kids.push(
+      h("div", { class: "list-label" }, "Token"),
+      h("div", { class: "token-row" }, field,
+        h("button", { type: "button", class: "btn small", onclick: () => { webhookUI.reveal = !reveal; renderWebhook(); } }, reveal ? "Hide" : "Show"),
+        h("button", { type: "button", class: "btn small", onclick: () => copyText(hook.token, field) }, "Copy")),
+      h("button", { type: "button", class: "btn small danger", onclick: () => { if (confirm("Make a new token? Anything using the current one stops working.")) updateWebhook({ regenerate: true }); } }, "Make a new token"),
+      hook.enabled ? null : h("p", { class: "muted small" }, "Turned off: requests with this token are refused."),
+      h("div", { class: "list-label" }, "Example"),
+      h("pre", { class: "code" }, `curl -X POST http://YOUR-HOST:8081/send \\
+  -H "Authorization: Bearer ${reveal ? hook.token : "<token>"}" \\
+  -H "Content-Type: application/json" \\
+  -d '{"recipient": "+15551234567", "message": "Backup finished"}'`),
+      h("p", { class: "muted small" }, "recipient: a number in international format, or \"self\" for your Note to Self. Use \"group_id\" to send to a group. Keep the token secret: it can send messages as this number."));
+  }
+  $("webhook-body").replaceChildren(...kids.filter(Boolean)); // replaceChildren would print "null"
 }
 
 // ------------------------------------------------------------------ websocket
@@ -1062,6 +1113,7 @@ function wire() {
   setIcon($("ctx-close"), "close");
   setIcon($("details-close"), "close");
   setIcon($("new-chat-close"), "close");
+  setIcon($("webhook-close"), "close");
   setIcon($("lightbox-close"), "close");
   setIcon($("jump-btn"), "down");
   setIcon(document.querySelector(".empty-art"), "chat");

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hmac
 import json
 import logging
 import mimetypes
@@ -132,6 +133,14 @@ class SignalService:
                 store.close()
                 continue
             self.accounts[acc.key] = acc
+
+    def webhook_account(self, token: str) -> tuple[Account | None, bool]:
+        """The account a webhook token belongs to, and whether webhook sending is on for it."""
+        for acc in self.accounts.values():
+            hook = acc.webhook()
+            if hook["token"] and hmac.compare_digest(hook["token"].encode(), token.encode()):
+                return acc, hook["enabled"]
+        return None, False
 
     def find_account(self, number: str | None = None, aci: str | None = None) -> Account | None:
         for acc in self.accounts.values():
@@ -349,6 +358,22 @@ class Account:
             "unread": self.store.total_unread(),
             "linked": self.linked,
         }
+
+    # ------------------------------------------------------------------ webhook sending
+
+    def webhook(self) -> dict:
+        """Whether outside services may send as this account (POST /api/hooks/send), and the token."""
+        return {
+            "enabled": self.store.get_meta("webhook_enabled") == "1",
+            "token": self.store.get_meta("webhook_token"),
+        }
+
+    def set_webhook(self, enabled: bool | None = None, regenerate: bool = False) -> dict:
+        if regenerate or (enabled and not self.store.get_meta("webhook_token")):
+            self.store.set_meta("webhook_token", "swh_" + secrets.token_urlsafe(32))
+        if enabled is not None:
+            self.store.set_meta("webhook_enabled", "1" if enabled else "0")
+        return self.webhook()
 
     async def call(self, method: str, params: dict | None = None, timeout: float = 60) -> Any:
         """RPC call scoped to this account (signal-cli runs in multi-account mode)."""

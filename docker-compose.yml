@@ -4,6 +4,7 @@ services:
       context: .
       # Use "jvm" on arm64 (Raspberry Pi, Ampere, Apple silicon hosts).
       target: native
+    image: signal-web:local
     container_name: signal-web
     restart: unless-stopped
     ports:
@@ -18,3 +19,27 @@ services:
       SEND_TYPING: "true"
       TRUST_NEW_IDENTITIES: "always"
       LOG_LEVEL: "INFO"
+
+  # Webhook relay: turns webhooks into Signal messages, for accounts you've enabled under
+  # account menu → Webhook sending. Same image, separate process and port, so your webhook system
+  # can reach this without reaching the (auth-less) main app. Remove this service if you don't need it.
+  signal-web-webhook:
+    image: signal-web:local
+    pull_policy: never
+    container_name: signal-web-webhook
+    restart: unless-stopped
+    depends_on:
+      - signal-web
+    command: ["python", "-m", "app.webhook"]
+    ports:
+      # Localhost only by default. If your webhook system runs on another machine, bind to your LAN
+      # IP instead (e.g. "192.168.1.10:8081:8081"). Requests still need a token from the GUI.
+      - "127.0.0.1:8081:8081"
+    environment:
+      SIGNAL_WEB_URL: "http://signal-web:8080"   # talks to the main app inside the compose network
+      LOG_LEVEL: "INFO"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8081/healthz"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s

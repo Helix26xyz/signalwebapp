@@ -6,6 +6,9 @@ a dependency to `api` (and a check in `websocket_endpoint`).
 Routes about one Signal account live under /api/accounts/{acct}/..., where {acct} is the account's
 phone number (or ACI if it has none). /api/status, /api/link and /ws are shared by all accounts;
 WebSocket events carry an "account" field.
+
+POST /api/hooks/send is for the webhook relay (app/webhook.py): it sends as whichever account the
+bearer token belongs to, and only if webhook sending is turned on for that account in the GUI.
 """
 
 from __future__ import annotations
@@ -18,7 +21,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 import segno
-from fastapi import APIRouter, Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -32,6 +35,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 STATIC = Path(__file__).parent / "static"
+log = logging.getLogger("signal-web.main")
 INLINE_SAFE = re.compile(r"^(image/(jpeg|png|gif|webp|avif|heic|heif|bmp)|video/[\w.+-]+|audio/[\w.+-]+)$", re.I)
 
 
@@ -65,6 +69,50 @@ class Reaction(BaseModel):
 
 class Delete(BaseModel):
     everyone: bool = False
+
+
+class WebhookSettings(BaseModel):
+    enabled: bool | None = None
+    regenerate: bool = False
+
+
+class HookSend(BaseModel):
+    recipient: str | None = None  # E.164 number, a contact's UUID, or "self" (Note to Self)
+    group_id: str | None = None
+    message: str
+
+
+MAX_HOOK_MESSAGE = 16_000
+
+
+def resolve_conversation(store, recipient: str | None, group_id: str | None) -> str:
+    """Turn what a user typed or picked into a conversation id, creating the conversation."""
+    if group_id:
+        conv_id = f"g:{group_id.strip()}"
+    elif recipient:
+        # Only phone numbers get normalized: contacts are sent as UUIDs, which contain dashes.
+        r = recipient.strip()
+        if r.startswith("+"):
+            r = normalize_number(r)
+            if not re.fullmatch(r"\+\d{6,15}", r):
+                raise HTTPException(400, "Use a phone number in international format, e.g. +15551234567")
+            number = r
+            r = store.rid_for_number(number) or number
+            if r == number:
+                store.upsert_recipient(r, number=number)
+        elif r != "self" and not store.recipient(r):
+            raise HTTPException(400, "Use a phone number in international format, e.g. +15551234567")
+        conv_id = f"u:{r}"
+    else:
+        raise HTTPException(400, "recipient or group_id required")
+    store.ensure_conversation(conv_id)
+    return conv_id
+
+
+def bearer_token(authorization: str | None, x_webhook_token: str | None) -> str | None:
+    if authorization and authorization.lower().startswith("bearer "):
+        return authorization[7:].strip() or None
+    return (x_webhook_token or "").strip() or None
 
 
 def get_account(request: Request, acct: str) -> Account:
@@ -130,6 +178,50 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         await svc(request).cancel_link()
         return {"ok": True}
 
+    # ---------------------------------------------------------------- webhook sending
+
+    @acct_api.get("/webhook")
+    async def webhook_settings(account: Account = Depends(get_account)):
+        return account.webhook()
+
+    @acct_api.put("/webhook")
+    async def update_webhook(body: WebhookSettings, account: Account = Depends(get_account)):
+        return account.set_webhook(body.enabled, body.regenerate)
+
+    @api.post("/hooks/send")
+    async def hook_send(
+        body: HookSend,
+        request: Request,
+        authorization: str | None = Header(None),
+        x_webhook_token: str | None = Header(None),
+    ):
+        token = bearer_token(authorization, x_webhook_token)
+        account, enabled = svc(request).webhook_account(token) if token else (None, False)
+        if account is None:
+            raise HTTPException(401, "Unknown webhook token")
+        if not enabled:
+            raise HTTPException(403, "Webhook sending is turned off for this account (enable it in Signal Web)")
+        text = body.message.strip()
+        if not text:
+            raise HTTPException(400, "message is empty")
+        if len(text) > MAX_HOOK_MESSAGE:
+            raise HTTPException(413, f"message is longer than {MAX_HOOK_MESSAGE} characters")
+        conv_id = resolve_conversation(account.store, body.recipient, body.group_id)
+        conv = account.store.conversation(conv_id) or {}
+        if conv.get("kind") == "group" and not conv.get("is_member", True):
+            raise HTTPException(400, "This account is not a member of that group")
+        msg = await account.send_message(conv_id, text)
+        log.info("webhook message sent from %s to %s: %s", account.key, conv_id, msg.get("status"))
+        result = {
+            "ok": msg.get("status") != "failed",
+            "account": account.key,
+            "conversation_id": conv_id,
+            "message_id": msg.get("id"),
+            "sent_ts": msg.get("sent_ts"),
+            "status": msg.get("status"),
+        }
+        return JSONResponse(result, status_code=200 if result["ok"] else 502)
+
     # ---------------------------------------------------------------- conversations
 
     @acct_api.get("/conversations")
@@ -138,27 +230,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @acct_api.post("/conversations")
     async def new_conversation(body: NewConversation, account: Account = Depends(get_account)):
-        store = account.store
-        if body.group_id:
-            conv_id = f"g:{body.group_id}"
-        elif body.recipient:
-            # Only phone numbers get normalized: contacts are sent as UUIDs, which contain dashes.
-            r = body.recipient.strip()
-            if r.startswith("+"):
-                r = normalize_number(r)
-                if not re.fullmatch(r"\+\d{6,15}", r):
-                    raise HTTPException(400, "Use a phone number in international format, e.g. +15551234567")
-                number = r
-                r = store.rid_for_number(number) or number
-                if r == number:
-                    store.upsert_recipient(r, number=number)
-            elif r != "self" and not store.recipient(r):
-                raise HTTPException(400, "Use a phone number in international format, e.g. +15551234567")
-            conv_id = f"u:{r}"
-        else:
-            raise HTTPException(400, "recipient or group_id required")
-        store.ensure_conversation(conv_id)
-        return store.conversation(conv_id)
+        conv_id = resolve_conversation(account.store, body.recipient, body.group_id)
+        return account.store.conversation(conv_id)
 
     @acct_api.get("/conversations/{conv_id:path}/messages")
     async def messages(

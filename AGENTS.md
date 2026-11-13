@@ -28,6 +28,7 @@ Signal servers ─► signal-cli jsonRpc (child process, --receive-mode=manual)
 | `app/store.py` | Schema, queries, decorating rows into API dicts. Re-entrant transactions (savepoints) |
 | `app/service.py` | `SignalService` (shared: RPC, `Hub`, linking, account discovery, routing envelopes to accounts, expiry loop) and `Account` (per account: outgoing actions, contact/group refresh, attachments, avatars, publishing events) |
 | `app/main.py` | FastAPI routes: shared ones under `/api`, per-account ones under `/api/accounts/{acct}`; request models are at module level (see Gotchas) |
+| `app/webhook.py` | **Webhook relay**, a separate process (`python -m app.webhook`, port 8081). Holds no state: parses the incoming webhook and forwards it with its token to `POST /api/hooks/send` |
 | `app/static/app.js` | Whole UI: state `S`, the `h()` DOM helper, render functions, WebSocket event handling |
 | `tests/fake_signal_cli.py` | Fake signal-cli speaking the same protocol, with two fake accounts; logs requests to `$FAKE_LOG` and injects envelopes from `$FAKE_INJECT_DIR` |
 | `tests/demo.py` | Runs the real app against the fake with seeded conversations |
@@ -60,6 +61,12 @@ Check desktop (1280×800), dark mode (`colorScheme: "dark"`) and mobile (390×78
   `Account` on the spot (a message can arrive before `finishLink` returns). API routes for one account
   live under `/api/accounts/{acct}` (`acct` = number, or ACI as an alias), via the `get_account`
   dependency. Every WebSocket event an `Account` sends carries `"account": <key>`. `status` events are global.
+
+- **Webhook sending.** `/api/hooks/send` sends as the account whose `meta.webhook_token` matches the
+  bearer token, and **only if `meta.webhook_enabled` is on**, which only the owner can turn on in the GUI
+  (`PUT /api/accounts/{acct}/webhook`). Enforce this in the app, never only in the relay. The relay
+  retries only on connection errors (nothing was sent), never after a response, so a webhook can't
+  send a message twice.
 
 - **Identity.** A recipient id (`rid`) is the ACI UUID when known, otherwise the E.164 number.
   The literal `"self"` means this account. Always resolve identities through `Ingestor.rid()`, which
